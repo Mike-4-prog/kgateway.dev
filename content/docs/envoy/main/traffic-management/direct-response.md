@@ -1,11 +1,12 @@
 ---
 title: Direct responses
+description: Return a fixed status code and body straight from the gateway without forwarding to a backend.
 weight: 20
 prev: /docs/traffic-management/destination-types
 next: /docs/traffic-management/match
 ---
 
-{{< reuse "docs/pages/traffic-management/direct-response.md" >}}
+{{< reuse "kgw-docs/pages/traffic-management/direct-response.md" >}}
 
 ## Other configurations
 

@@ -1,152 +1,132 @@
 ---
 title: Release notes
+description: What's new, breaking changes, and bug fixes for each kgateway release.
 weight: 100
 ---
 
 Review the release notes for kgateway. For a detailed list of changes between tags, use the [GitHub Compare changes tool](https://github.com/kgateway-dev/kgateway/compare/).
 
-## v2.3.0
+## 2.4.0
 
-<!-- TODO release 2.2 
-For more details, review the [GitHub release notes](https://github.com/kgateway-dev/kgateway/releases/tag/v2.2.0).-->
+### 🔥 Breaking changes {#v23-breaking-changes}
 
-### 🔥 Breaking changes {#v22-breaking-changes}
+#### Envoy 1.38
 
+The Envoy dependency in kgateway was upgraded to 1.38.x. This change includes the following upstream breaking changes.
 
-### 🌟 New features {#v22-new-features}
+* **RSA key usage enforcement**: Envoy 1.38 sets [`enforce_rsa_key_usage`](https://www.envoyproxy.io/docs/envoy/v1.38.0/api-v3/extensions/transport_sockets/tls/v3/tls.proto.html#envoy-v3-api-field-extensions-transport-sockets-tls-v3-upstreamtlscontext-enforce-rsa-key-usage) to `true` by default for upstream TLS connections. If the `keyUsage` extension is present in the upstream certificate and is incompatible with the TLS usage, the TLS handshake fails. In a future version of Envoy, this option will be removed and enforcing behavior will always apply. This setting is specific to upstream TLS connections (not downstream client connections). The `keyUsage` extension tells consumers what the certificate's public key is allowed to be used for. If the extension is present but does not match the TLS role, the upstream handshake fails. Note that kgateway does not expose this setting in `BackendConfigPolicy`, so it cannot be set back to `false`. Common RSA key usage values compatible with TLS are:
+  * `digitalSignature`
+  * `keyEncipherment`
+  * `keyCertSign` (CA certs only)
+  * `cRLSign` (CA certs that sign revocation lists only)
 
-#### Control plane changes
+  Verify your upstream certificates include compatible `keyUsage` values before upgrading.
 
-- **Common labels**: Add custom labels to all resources that are created by the Helm charts by using the `commonLabels` field, including the Deployment, Service, and ServiceAccount of the control plane. This allows you to better organize your resources or integrate with external tools. For more information, see [Common labels]({{< link-hextra path="/install/advanced/#common-labels" >}}).
-- **PriorityClass support**: Assign a PriorityClassName to control plane pods using the `controller.priorityClassName` Helm field. [Priority](https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/) indicates the importance of a pod relative to other pods and allows higher priority pods to preempt lower priority ones when scheduling.
-- **Topology spread constraints**: Distribute kgateway controller pods across failure domains such as zones or nodes by using the `topologySpreadConstraints` Helm field. For more information, see [Topology spread constraints]({{< link-hextra path="/install/advanced/#topology-spread-constraints" >}}).
-- The default `app.kubernetes.io/component: controller` label is added to the controller deployment. Similarly, the `app.kubernetes.io/component: proxy` is added to all gateway proxies. 
+* **Circuit breaker metrics**: Added a new `upstream_rq_active_overflow` counter that is incremented when a request is rejected because the `max_requests` circuit breaker is exhausted. Previously, this condition incorrectly incremented the `upstream_rq_pending_overflow` metric, making it impossible to distinguish between pending queue saturation and active request saturation. After the upgrade, only the `upstream_rq_active_overflow` is incremented for this case, so you might see a drop in `upstream_rq_pending_overflow` counts. If you have existing dashboards or alerts that rely on the `upstream_rq_pending_overflow` metric to detect `max_requests` circuit breaker trips, set the Envoy runtime flag `envoy.reloadable_features.skip_pending_overflow_count_on_active_rq` to `false` to increment both counters while you migrate your monitoring to the `upstream_rq_active_overflow` metric.
+* **Memory management**: Replaced the custom timer-based tcmalloc memory release with tcmalloc's native `ProcessBackgroundActions` and `SetBackgroundReleaseRate` APIs. This provides more comprehensive background memory management, including per-CPU cache reclamation, cache shuffling, and size class resizing, in addition to memory release. The `tcmalloc.released_by_timer` stat is removed.
+* **RBAC header matching**: Fixed the RBAC header matcher to validate each header value individually instead of concatenating multiple header values into a single string. This prevents potential policy bypasses when requests contain multiple values for the same header. The new behavior is enabled by default and controlled by the runtime guard `envoy.reloadable_features.rbac_match_headers_individually`.
 
-#### Static IPs for Gateways
+### 🌟 New features {#v23-new-features}
 
-Assign a static IP address to the Kubernetes service that exposes your Gateway using the `spec.addresses` field with `type: IPAddress`.
+#### Configurable ExtProc filter stages {#v24-extproc-filter-stages}
 
-For more information, see [Static IP address]({{< link-hextra path="/setup/gateway/#static-ip-address" >}}). 
+You can now control where in the Envoy filter chain an ExtProc filter runs by setting the `filterStage` field in the GatewayExtension resource. You can also apply multiple ExtProc filters to the same route at different stages.
 
-#### Local rate limit filter options {#v23-local-rate-limit-filter-options}
+For more information, see [Staged ExtProc filters]({{< link-hextra path="/traffic-management/extproc/filter-stages/" >}}).
 
-The {{< reuse "docs/snippets/trafficpolicy.md" >}} resource now supports the `percentEnabled` and `percentEnforced` optional fields to control the percentage of requests for which the local rate limit filter is enabled or enforced. If not set, both fields default to `100`, which enables and enforces the local rate limiting filter for 100% of all requests.
+#### Forward client certificate header {#v24-xfcc}
 
-Use these fields for gradual rollouts or to run the filter in shadow mode (`percentEnabled: 100`, `percentEnforced: 0`), where rate limiting statistics are collected without blocking any requests.
+You can now configure how the gateway proxy handles the `x-forwarded-client-cert` (XFCC) header before forwarding requests to upstream backends by using the `forwardClientCertDetails` field in the ListenerPolicy. By default, Envoy strips the XFCC header from all requests. 
 
-For more information, see [Gradual rollout and shadow mode]({{< link-hextra path="/security/ratelimit/local/#gradual-rollout" >}}).
+For more information, see [Forward client certificate header]({{< link-hextra path="/traffic-management/header-control/forward-xfcc/" >}}).
 
+#### Strip port from Host header {#v24-strip-host-port}
 
-#### Envoy application log format {#v23-envoy-log-format}
+Added the `stripHostPortMode` setting to the HTTP settings of the ListenerPolicy resource that allows you to configure the gateway proxy to strip the port information from the `Host` or `authority` header before forwarding requests to upstream backends. You can choose between two modes: 
+* `AnyPort`: Removes any port from the header.
+* `MatchingPort`: Removes the port only if it matches the listener's own port.  
 
-Configure how Envoy formats its application logs by using the `logFormat` field in the GatewayParameters resource. You can choose between structured JSON or text output. This setting controls the Envoy application log format only and does not affect access logs.
+For more information, see [Strip port from Host header]({{< link-hextra path="/traffic-management/header-control/strip-port-host/" >}}).
 
-For more information, see [Change proxy settings]({{< link-hextra path="/setup/customize/gateway/#built-in" >}}).
+#### Limit request header count {#v24-max-headers-count}
 
-#### Gateway proxy customization with overlays {#v23-gateway-customization}
+Added the `maxHeadersCount` field to the HTTP settings of the ListenerPolicy resource. You can use this field to set the maximum number of headers that Envoy accepts on incoming requests. Requests that exceed the limit receive a `431 Request Header Fields Too Large` response for HTTP/1.x connections and a stream reset for HTTP/2 connections. If unset, Envoy's built-in default of 100 headers is used.
 
-The GatewayParameters resource now supports gateway proxy customization via overlay fields. Overlays use strategic merge patch (SMP) semantics to apply advanced customizations to the Kubernetes resources that are generated for gateway proxies, including the Service, ServiceAccount, and Deployment. 
+For more information, see [Limit request header count]({{< link-hextra path="/traffic-management/header-control/max-headers-count/" >}}).
 
-The following overlays are supported: 
+#### AWS EC2 backend {#v24-ec2-backend}
 
-* Use `deploymentOverlay`, `serviceOverlay`, and `serviceAccountOverlay` to patch the generated Deployment, Service, and ServiceAccount.
-* Use `horizontalPodAutoscaler`, `verticalPodAutoscaler`, and `podDisruptionBudget` to automatically create and configure these resources targeting the proxy Deployment.
+You can now route traffic directly to AWS EC2 instances that are discovered dynamically by using tag-based filters. The gateway proxy periodically calls `ec2:DescribeInstances` to refresh the list of running instances that match your filters, and serves the endpoints to Envoy through EDS (Endpoint Discovery Service). To enable this feature, set `controller.enableAwsEc2Discovery=true` in your Helm values.
 
-For more information, see [Change proxy settings]({{< link-hextra path="/setup/customize/gateway/" >}}) and [Overlay examples]({{< link-hextra path="/setup/customize/configs/" >}}).
+For more information, see [AWS EC2]({{< link-hextra path="/traffic-management/destination-types/backends/ec2/" >}}).
 
-#### Additional Envoy container arguments {#envoy-extra-args}
+#### Solo Istio cluster draining weights {#v24-cluster-draining}
 
-Use `spec.kube.envoyContainer.extraArgs` to pass additional Envoy CLI arguments to the managed proxy container. User-supplied arguments are appended after the default built-in Envoy arguments.
+kgateway now honors the `solo.io/draining-weight` annotation on east-west and remote peering gateways when routing ingress traffic to a multicluster ambient mesh. Previously, the draining weight was respected by ztunnel and waypoints for east-west traffic, but kgateway continued to send ingress traffic to a draining cluster, resulting in connection errors.
 
-The following example sets a custom base ID and enables CPU set threading:
+When a remote cluster's east-west gateway is annotated with `solo.io/draining-weight`, kgateway adjusts the Envoy load balancing weights for that cluster's endpoints on the ingress path:
 
-```yaml
-kubectl apply --server-side -f- <<'EOF'
-apiVersion: {{< reuse "docs/snippets/trafficpolicy-apiversion.md" >}}
-kind: {{< reuse "docs/snippets/gatewayparameters.md" >}}
-metadata:
-  name: gw-params
-  namespace: {{< reuse "docs/snippets/namespace.md" >}}
-spec:
-  kube:
-    envoyContainer:
-      extraArgs:
-        - --base-id
-        - "7"
-        - --cpuset-threads
-EOF
-```
+| Draining mode | Annotation value | Traffic to remote cluster |
+|---|---|---|
+| Off (default) | `solo.io/draining-weight: "0"` or absent | 100% |
+| Partial | `solo.io/draining-weight: "40"` | 60% (100% minus the draining weight) |
+| Full | `solo.io/draining-weight: "100"` | 0% (cluster excluded from Envoy endpoint set) |
 
-#### Upstream proxy protocol {#v23-upstream-proxy-protocol}
+#### Inject header values from Kubernetes Secrets {#v24-header-from-secret}
 
-The `BackendConfigPolicy` resource now supports an `upstreamProxyProtocol` field. When configured, the gateway proxy prepends a PROXY protocol header to outbound TCP connections to the upstream backend, allowing the backend to see the original client IP address and port. Both PROXY protocol `V1` (human-readable) and `V2` (binary) are supported.
+You can now source HTTP header values from Kubernetes Secrets instead of inlining them in your route configuration. Use the `secretRef` field on the `HTTPHeaderFilter` in a {{< reuse "kgw-docs/snippets/trafficpolicy.md" >}} resource to reference a secret. The gateway proxy automatically injects the secret value as a request or response header at runtime.
 
-For more information, see [Outbound proxy protocol]({{< link-hextra path="/traffic-management/proxy-protocol/#outbound" >}}).
+For more information, see [Add a header from a secret]({{< link-hextra path="/traffic-management/header-control/request-header/#header-from-secret" >}}).
 
-#### Allow requests without proxy protocol {#v23-proxy-protocol-allow-without-header}
+#### Downstream HTTP/2 protocol options {#v24-http2-protocol-options}
 
-The ListenerPolicy proxy protocol configuration now supports an `allowRequestsWithoutProxyProtocol` field. When set to `true`, a single listener accepts connections with or without a PROXY protocol header. By default, the field is set to `false` and the listener strictly requires a PROXY protocol header on all incoming connections.
+You can now configure the HTTP/2 connection behavior between downstream clients and the gateway proxy by setting the `http2ProtocolOptions` field in the ListenerPolicy resource. The new settings let you configure the initial stream and connection flow-control window sizes and the maximum number of concurrent streams per connection.
 
-For more information, see [Allow connections without proxy protocol headers]({{< link-hextra path="/traffic-management/proxy-protocol/#allow-without-proxy-protocol" >}}).
+For more information, see [HTTP/2 downstream]({{< link-hextra path="/traffic-management/http2-downstream/" >}}).
 
-#### Circuit breaker remaining capacity metrics {#v23-circuit-breaker-track-remaining}
+#### Custom Envoy bootstrap config {#v24-custom-bootstrap}
 
-The `BackendConfigPolicy` circuit breakers configuration now supports a `trackRemaining` field. When set to `true`, Envoy emits gauge metrics for the remaining capacity of each circuit breaker threshold group: `remaining_cx`, `remaining_pending`, `remaining_rq`, and `remaining_retries`. Note that enabling this field has a small performance overhead.
+You can now inject custom Envoy bootstrap configuration into a managed gateway proxy by overriding the bootstrap ConfigMap that the control plane generates with a `deploymentOverlay` in the {{< reuse "kgw-docs/snippets/gatewayparameters.md" >}} resource. Use this method to configure bootstrap-level options that are not exposed as built-in fields, such as `stats_config.histogram_bucket_settings` to tune histogram bucket boundaries for your metrics.
 
-For more information, see [Track remaining capacity]({{< link-hextra path="/resiliency/circuit-breakers/#track-remaining" >}}).
+For more information, see [Custom Envoy bootstrap config]({{< link-hextra path="/setup/customize/envoy/custom-bootstrap/" >}}).
 
-#### IP-based access control (ACL) {#v23-acl}
+#### Customizable controller probes {#v24-controller-probes}
 
-The {{< reuse "docs/snippets/trafficpolicy.md" >}} resource now supports an `acl` field for IP-based access control. You can define allow and deny rules by using CIDR blocks or bare IP addresses, set a `defaultAction` for unmatched requests, and customize denial responses with a custom HTTP status code and headers. 
+You can now override the readiness and startup probes for the kgateway controller container by using the `controller.readinessProbe` and `controller.startupProbe` Helm values. Settings are deep-merged with the defaults, so you only need to specify the fields you want to change. 
 
-For more information, see [IP-based access control (ACL)]({{< link-hextra path="/security/acl/" >}}).
+For more information, see [Controller probes]({{< link-hextra path="/install/advanced/#controller-probes" >}}).
 
-#### Fault injection {#v23-fault-injection}
+#### Configurable admin server bind address {#v24-admin-bind-address}
 
-The {{< reuse "docs/snippets/trafficpolicy.md" >}} resource now supports a `faultInjection` field for chaos engineering and resiliency testing. You can inject the following fault types into a percentage of requests:
+You can now configure the bind address for the kgateway controller's admin and debug server by using the `controller.admin.bindAddress` Helm value or the `KGW_ADMIN_BIND_ADDRESS` environment variable. The server listens on port 9095. By default, the server binds to `localhost` and is only accessible from within the pod. Set `bindAddress` to `0.0.0.0` to expose the server outside the pod for profiling or diagnostics in trusted environments.
 
-- **Delays**: Inject a fixed latency before forwarding the request upstream to simulate slow networks or overloaded backends.
-- **Aborts**: Return an HTTP or gRPC error code without forwarding the request to simulate upstream failures.
-- **Response rate limiting**: Throttle the response body data rate to simulate degraded upstream connections.
+For more information, see [Controller admin server bind address]({{< link-hextra path="/install/advanced/#controller-admin-server-bind-address" >}}).
 
-Fault injection can be applied at the route level by targeting an HTTPRoute, or at the gateway level by targeting a Gateway. A route-level policy can use `disable: {}` to opt out of a gateway-level fault injection policy.
+#### Downstream TCP keepalive {#v24-downstream-tcp-keepalive}
 
-For more information, see [Fault injection]({{< link-hextra path="/resiliency/fault-injection/" >}}).
+You can now configure TCP keepalive for downstream client connections on a gateway listener, such as the idle time before probes start, the interval between probes, and the maximum number of probes before a connection is considered stale, by using the `tcpKeepalive` field in the ListenerPolicy resource. 
 
-#### OpenTelemetry tracing {#v23-otel-tracing}
+For more information, see [TCP keepalive]({{< link-hextra path="/resiliency/tcp-keepalive/" >}}).
 
-Configure distributed tracing for your gateway by using the ListenerPolicy resource, and override tracing settings per route with a `TrafficPolicy` resource.
+#### PROXY protocol on the Envoy readiness listener {#v24-readiness-proxy-protocol}
 
-The following tracing improvements are included in this release:
+You can now enable the PROXY protocol listener filter on the Envoy readiness listener (port 8082) by setting `spec.kube.envoyContainer.bootstrap.enableReadinessProbeProxyProtocol: true` in the {{< reuse "kgw-docs/snippets/gatewayparameters.md" >}} resource. This configuration allows an external load balancer that prepends PROXY protocol headers, such as an AWS NLB with proxy protocol v2 enabled, to perform health checks against the readiness port. Kubelet probes continue to work because the filter accepts connections without a PROXY header.
 
-- **Listener-level tracing**: Configure the OTel provider, sampling rates (`clientSampling`, `randomSampling`, `overallSampling`), and custom span attributes in a ListenerPolicy that targets your Gateway.
-- **Per-route tracing overrides**: Use a TrafficPolicy that targets an HTTPRoute or GRPCRoute to override sampling rates, add route-specific span attributes, or disable tracing for specific routes.
-- **Auto-populated resource attributes**: [OTel semantic convention](https://opentelemetry.io/docs/specs/semconv/resource/) resource attributes are automatically added to all spans, including `service.name`, `service.namespace`, `service.instance.id`, `service.version`, and Kubernetes identity attributes such as `k8s.pod.name`, `k8s.node.name`, and `k8s.deployment.name`.
+For more information, see [Readiness listener PROXY protocol]({{< link-hextra path="/traffic-management/proxy-protocol/#readiness" >}}).
 
-For more information, see [Tracing]({{< link-hextra path="/observability/tracing/" >}}).
+#### BackendConfigPolicy merge semantics {#v24-bcp-merge}
 
-#### Dynamic direct response bodies {#v23-direct-response-body-format}
+When multiple BackendConfigPolicy resources target the same backend, their fields are now merged. If two or more policy resources configure the same top-level fields, only the oldest policy fields are enforced. If a BackendConfigPolicy and a BackendTLSPolicy both target the same backend, the BackendTLSPolicy takes precedence for TLS configuration and an `Overridden` condition is set on the BackendConfigPolicy to inform you of the conflict.
 
-The DirectResponse resource now supports a `bodyFormat` field for returning dynamic response bodies by using [Envoy format strings](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/core/v3/substitution_format_string.proto). Format strings use `%VARIABLE%` placeholders that Envoy substitutes at request time, such as request headers or dynamic metadata. You can choose between returning a text or JSON body. Both formats are mutually exclusive. 
+For more information, see [BackendConfigPolicy]({{< link-hextra path="/about/policies/backendconfigpolicy/#policy-priority-and-merging-rules" >}}).
 
-For more information, see [Dynamic text body]({{< link-hextra path="/traffic-management/direct-response/#dynamic-text-body" >}}) and [Dynamic JSON body]({{< link-hextra path="/traffic-management/direct-response/#dynamic-json-body" >}}).
+#### Zone-aware routing {#v24-zone-aware-routing}
 
-#### GRPCRoute support {#v23-grpcroute}
+You can now configure zone-aware routing for backend services by using the `loadBalancer.zoneAware` field in a BackendConfigPolicy resource. Zone-aware routing instructs the gateway proxy to prefer endpoints in its own availability zone, reducing cross-zone latency and network costs. 
 
-Route traffic to gRPC services by using the GRPCRoute resource for protocol-aware routing. Unlike the HTTPRoute, which requires matching on HTTP paths and methods, the GRPCRoute allows you to define routing rules by using gRPC-native concepts, such as service and method names.
+For more information, see [Zone-aware routing]({{< link-hextra path="/traffic-management/zone-routing/" >}}).
 
-For more information, see [gRPC routing]({{< link-hextra path="/traffic-management/grpc/" >}}).
-
-#### TLS termination for TLSRoutes and TCPRoutes {#v23-tls-terminate}
-
-Terminate TLS traffic at the gateway by using a TLS listener in `Terminate` mode with either a TLSRoute or a TCPRoute. The gateway decrypts incoming TLS traffic using a server-side certificate and forwards the plain traffic to the backend service via TCP proxy.
-
-- **TLSRoute**: Supports SNI-based hostname matching. Use this when you need to route traffic to different backends based on the requested hostname.
-- **TCPRoute**: Routes traffic based on listener port only, without SNI hostname matching. Use this listener for simpler port-based routing.
-
-For more information, see [TLS termination for TLSRoutes]({{< link-hextra path="/setup/listeners/tls-termination/" >}}) and [TLS termination for TCPRoutes]({{< link-hextra path="/setup/listeners/tls-termination-tcproute/" >}}).
-
-<!-- TODO release 2.2
+<!--
 
 ### ⚒️ Installation changes {#v2.2-installation-changes}
 
@@ -156,3 +136,4 @@ For more information, see [TLS termination for TLSRoutes]({{< link-hextra path="
 
 ### 🚧 Known issues {#v2.2-known-issues}
 -->
+
